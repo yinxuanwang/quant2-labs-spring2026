@@ -1,0 +1,100 @@
+---
+title: "Quant2 Lab1 Exercise"
+date: "01/29/2026"
+format: 
+  pdf:
+    include-in-header: 
+      - text: |
+          \usepackage{fvextra}
+          \fvset{breaklines=true, commandchars=\\\{\}, breaksymbolleft={}, breakindentnchars=4}
+editor: visual
+---
+
+# Simulated Potential Outcome Data
+
+-   Download the file `thescience.tsv` and `lab01_exercise.qmd` from this week's lab folder on GitHub
+-   Move the file to a "lab01" folder on your own computer
+-   Install the `pacman`, `tidyverse` and `here` R packages if you don't already have them
+
+```{r}
+#| message: false
+# install.packages(c('pacman','tidyverse', 'here'))
+pacman::p_load(tidyverse, here)
+df <- read_tsv(here('lab01/thescience.tsv'))
+```
+
+The data contains the following columns:
+
+-   Potential Outcomes: `y0` and `y1`
+-   Observed Outcome: `y`
+-   Treatment: `t`
+-   Covariates: `x_1`, `x_2`, `x_3`
+
+```{r}
+df %>% head
+```
+
+How does the observed outcome `y` relate to the treatment `t` and the potential outcomes `y0` and `y1`?
+
+```{r}
+df %>% select(y0, y1, t, y) %>% tail
+```
+
+Calculate the difference in means between the treated and the untreated.
+
+```{r}
+mean(filter(df, t == 1)$y) - mean(filter(df, t == 0)$y)
+```
+
+Calculate the true global average treatment effect
+
+```{r}
+mean(df$y1 - df$y0)
+```
+
+Why they are different?
+
+```{r}
+# Selection bias because there is a difference in the potential outcomes
+# of the treatment vs. control
+mean(filter(df, t == 1)$y0) - mean(filter(df, t == 0)$y0)
+
+# We can see this graphically by plotting the data
+df %>% ggplot(aes(x =t , y = y0)) + geom_point() + theme_bw()
+
+# Or we can observe this by noting that treatment and potential outcomes
+# are correlated
+cor(df$t, df$y0)
+
+# Selection bias wrt ATE?
+rho_i <- df$y1 - df$y0
+mean(rho_i[df$t == 1]) - mean(rho_i[df$t == 0])
+```
+
+# Exercise
+
+Do the next part in pairs. Prepare your work using Quarto
+
+## What is the ATE vs the ATC and ATT?
+
+How would we calculate these from the science?
+
+```{r}
+# your code here
+```
+
+## Which of x1, x2, and x3 are associated with treatment assignment? Are they potentially confounders for identifying the ATE?
+
+```{r}
+# your code here
+```
+
+## Fixing the ATE estimation
+
+-   You get to play omnipotent being! Create an alternate universe (ie, a new treatment assignment and new outcome variable) such that the difference in means between the treated and the untreated can be reliably estimated.
+-   Estimate the difference in means and compare it to the true effect.
+-   Are they different? Why/How?
+
+```{r}
+# your code here
+```

@@ -1,0 +1,50 @@
+---
+title: Quant II - Lab 1
+author: Your Name
+format: pdf
+date: 2026-01-29
+---
+
+# Section Heading
+
+## Subsection Heading
+
+-   In bullet points
+-   *Italics*
+-   **Bold**
+-   `monospace font`
+
+### Subsubsection with Latex
+
+$e^{i\pi }+1=0$
+
+# Code chunks 
+
+```{r}
+# A code chunk
+1 + 1
+```
+
+You can make code chunks inline like this: 2+2 = `r 2+2`.
+
+You can also adjust how the code chunks behave with chunk options.
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r}
+#| echo: false
+3+3
+```
+
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(here)
+df <- read_tsv(here('lab01','thescience.tsv'))
+df %>% ggplot(aes(x=x1)) + geom_histogram()
+```
+
+
+*To learn more about Quarto see <https://quarto.org>.*
