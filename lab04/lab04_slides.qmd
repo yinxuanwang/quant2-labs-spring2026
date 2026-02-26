@@ -20,8 +20,7 @@ execute:
 - Effective Sample Size
 - Weighting
 - Specification Error
-- Double Machine Learning
-- AIPW
+- Double Machine Learning Partially Linear Regression
 
 
 ```{r}
