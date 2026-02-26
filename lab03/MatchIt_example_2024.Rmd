@@ -1,0 +1,205 @@
+---
+title: "Lab 5: Matching and Weighting"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-03-01"
+---
+
+
+# Matching: MatchIt
+
+We will use Lalonde's data on the evaluation of the National Supported Work program to demonstrate MatchIt's capabilities.
+
+```{r}
+pacman::p_load(tidyverse, MatchIt, broom, fixest, knitr, Matching, rgenoud, WeightIt)
+data(lalonde)
+lalonde <- lalonde %>% mutate(
+     race = case_when(
+          black == 1 ~ 'black',
+          hisp == 1 ~ 'hispanic',
+          TRUE ~ 'white'
+     )
+)
+head(lalonde) %>% kable
+
+```
+
+The statistical quantity of interest is the causal effect of the treatment (`treat`) on 1978 earnings (`re78`). The other variables are pre-treatment covariates. See `?lalonde` for more information on this dataset. 
+
+Before matching, it can be a good idea to view the initial imbalance in one's data that matching is attempting to eliminate. We can do this using the code below:
+
+```{r}
+m.out0 <- matchit(
+     treat ~ age + educ + race + married +
+          nodegr + re74 + re75,
+     data = lalonde,
+     method = NULL, distance = "glm"
+)
+summary(m.out0)
+plot(m.out0,
+     type = "qq", interactive = FALSE,
+     which.xs = c("age", "married", "re75")
+)
+```
+
+We can see severe imbalances as measured by the standardized mean differences (`Std. Mean Diff.`), variance ratios (`Var. Ratio`), and empirical cumulative density function (eCDF) statistics. Values of standardized mean differences and eCDF statistics close to zero and values of variance ratios close to one indicate good balance, and here many of them are far from their ideal values.
+
+Now, matching can be performed. There are several different classes and methods of matching. You can use vignette("matching-methods") to know more.
+
+## Exact Matching
+
+With exact matching, a complete cross of the covariates is used to form subclasses defined by each combination of the covariate levels. Any subclass that doesn't contain both treated and control units is discarded, leaving only subclasses containing treatment and control units that are exactly equal on the included covariates. The benefits of exact matching are that confounding due to the covariates included is completely eliminated, regardless of the functional form of the treatment or outcome models. The problem is that typically many units will be discarded, sometimes dramatically reducing precision and changing the target population of inference.
+
+```{r}
+# Exact Matching
+m.exact <- matchit(
+     treat ~ age + educ + race + married +
+          nodegr + re74 + re75,
+     data = lalonde,
+     method = "exact", distance = "glm"
+)
+m.exact
+
+# un=F flag to exclude the pre-matched balance checks
+summary(m.exact, un=F)
+plot(m.exact,
+     type = "qq", interactive = FALSE,
+     which.xs = c("age", "married", "re75")
+)
+plot(summary(m.exact))
+```
+
+## CEM
+
+Coarsened exact matching (CEM) is a form of stratum matching that involves first coarsening the covariates by creating bins and then performing exact matching on the new coarsened versions of the covariates.
+The degree and method of coarsening can be controlled by the user to manage the trade-off between exact and approximate balancing.
+
+The default coarsening strategy uses the Sturges method for setting the bin size. See `?nclass.Sturges` for more information. You can set the cutpoints manually using the `cutpoints` argument. See `?method_cem` for more information.
+
+```{r}
+m.cem <- matchit(
+     treat ~ age + educ + race + married +
+          nodegr + re74 + re75,
+     data = lalonde,
+     method = "cem"
+)
+summary(m.cem, un = FALSE)
+plot(m.cem,
+     type = "qq", interactive = FALSE,
+     which.xs = c("age", "married", "re75")
+)
+plot(summary(m.cem))
+```
+
+## Propensity Score Matching
+
+Next, we will perform 1:1 nearest neighbor (NN) matching on the propensity score. One by one, each treated unit is paired with an available control unit that has the closest propensity score to it. Any remaining control units are left unmatched and excluded from further analysis.
+
+We use the same syntax as before, but this time specify `method = "nearest"` to implement nearest neighbor matching, again using a logistic regression propensity score. Many other arguments are available for tuning the matching method and method of propensity score estimation.
+
+```{r}
+m.pscore.nn <- matchit(
+     treat ~ age + educ + race + married +
+          nodegr + re74 + re75,
+     data = lalonde,
+     method = "nearest", distance = "glm"
+)
+summary(m.pscore.nn, un = FALSE)
+```
+
+
+
+Although balance has improved for some covariates, in general balance is still quite poor, indicating that nearest neighbor propensity score matching is not sufficient for removing confounding in this dataset. The final column, `Std. Pair Diff`, displays the average absolute within-pair difference of each covariate. When these values are small, better balance is typically achieved and estimated effects are more robust to misspecification of the outcome model
+```{r}
+plot(m.pscore.nn,
+     type = "qq", interactive = FALSE,
+     which.xs = c("age", "married", "re75")
+)
+plot(summary(m.pscore.nn))
+plot(m.pscore.nn, type = "jitter", interactive = FALSE)
+```
+
+## Hybrid: Exact and Propensity Score Matching 
+
+The MatchIt package also allows us to use a hybrid technique: we can specify certain covariates to match on exactly and use nearest neighbor matches to do the rest of the work. 
+
+```{r}
+m.exact.subset <- matchit(
+     treat ~ age + educ + race + nodegr +
+          married + re74 + re75,
+     data = lalonde, replace = TRUE,
+     distance = "glm",
+     exact = ~ married + race
+)
+```
+
+```{r}
+m.exact.subset
+```
+
+```{r}
+summary(m.exact.subset, un = TRUE)
+```
+
+```{r}
+plot(m.exact.subset,
+     type = "qq", interactive = FALSE,
+     which.xs = c("age", "married", "re75")
+)
+plot(summary(m.exact.subset))
+```
+
+## Genetic/MD Nearest neighbor matching
+
+Instead of nearest neighbor matching on the propensity score, we can also use a genetic algorithm based on the Mahalanobis distance.
+
+The argument `pop.size` must be set and is a hyper-parameter to the genetic algorithm
+
+```{r}
+m.genetic.nn <- matchit(
+     treat ~ age + educ + race + nodegr +
+          married + re74 + re75,
+     data = lalonde, replace = TRUE,
+     method = "genetic", 
+     pop.size = 150
+)
+summary(m.genetic.nn, un = TRUE)
+plot(m.genetic.nn,
+     type = "qq", interactive = FALSE,
+     which.xs = c("age", "married", "re75")
+)
+plot(summary(m.genetic.nn))
+```
+
+## Comparison of Methods
+
+```{r}
+fmla.c <- as.formula("re78 ~ treat + age + educ + race + married + nodegr + re74 + re75")
+etable(
+     list(
+          feols(fmla, data=match.data(m.cem)),
+          feols(fmla, data=match.data(m.exact.subset)),
+          feols(fmla, data=match.data(m.pscore.nn)),
+          feols(fmla, data=match.data(m.genetic.nn)),
+          feols(fmla, data=lalonde)
+     ),
+     keep='treat',
+     fitstat=c('n')
+)
+```
+
+# WeightIt
+
+```{r}
+W <- weightit(treat ~ age + educ + nodegr + 
+                married + race + re74 + re75, 
+              data = lalonde, method = "glm", 
+)
+W
+summary(W)
+fit <- lm_weightit(re78 ~ treat, data = lalonde,
+                   weightit = W)
+
+summary(fit, ci = TRUE)
+```
