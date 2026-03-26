@@ -1,0 +1,916 @@
+---
+title: Quant II
+subtitle: Lab 6
+author: Yinxuan Wang
+date: '2026-03-26'
+format:
+  beamer:
+    theme: CambridgeUS
+    colortheme: dolphin
+    fonttheme: structurebold
+    incremental: false
+execute:
+  echo: true
+  warning: false
+  message: false
+params:
+  mafia_data: "Organized Crime and Political Quality.dta"
+---
+
+# Today's Agenda
+
+- DID: 2x2, Multi-period single-event, staggered treatment
+- `panelView` for visualization
+- `HonestDiD`
+- Goodman-Bacon decomposition `bacondecomp`
+- dCDH `TwoWayFEWeights`
+- Sun and Abraham in `fixest`
+- Callaway and Sant'Anna estimator \& package `did`
+- ......
+
+
+# Parallel Trend Assumptions
+
+## Parallel Trends
+
+$$\mathbb{E}\big[ Y_{i1}(0) - Y_{i0}(0) \mid T_i = 1 \big] = \mathbb{E}\big[ Y_{i1}(0) - Y_{i0}(0) \mid T_i = 0 \big]$$
+
+The average \textit{trend in untreated potential outcomes} is the same for treated and control groups.
+
+## No Anticipation
+
+$$Y_{i0}(1) = Y_{i0}(0) \quad \text{for all } i$$
+
+Treatment has no causal effect prior to implementation.
+
+
+# Simplest setting - 2x2
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(fixest)
+library(panelView)
+library(did)
+library(HonestDiD)
+library(PanelMatch)
+library(haven)
+# library(janitor)
+# library(DIDmultiplegt)
+library(bacondecomp)
+library(TwoWayFEWeights)
+library(knitr)
+library(modelsummary)
+library(kableExtra)
+
+theme_set(theme_minimal(base_size = 20))
+set.seed(1234)
+```
+
+```{r}
+#| label: sim-2x2-data
+#| echo: false
+n_treated <- 1000
+n_control <- 1000
+
+sim_2x2 <- tibble(
+  id = 1:(n_treated + n_control),
+  group = rep(c("control", "treated"), c(n_control, n_treated))
+) |>
+  tidyr::expand_grid(period = c("pre", "post")) |>
+  mutate(
+    treated_group = as.integer(group == "treated"),
+    post = as.integer(period == "post"),
+    D = treated_group * post,
+    alpha_i = if_else(group == "treated", 2, 1),
+    lambda_t = if_else(period == "post", 1, 0),
+    tau = 2,
+    y0 = alpha_i + lambda_t + rnorm(n(), 0, 1),
+    Y = y0 + tau * D
+  )
+```
+
+
+```{r}
+#| label: plot-2x2-means
+#| echo: false
+#| fig-width: 6
+#| fig-height: 3
+sim_2x2 |>
+  mutate(
+    period = factor(period, levels = c("pre", "post")),
+    group  = factor(group, levels = c("control", "treated"))
+  ) |>
+  group_by(group, period) |>
+  summarise(mean_y = mean(Y), .groups = "drop") |>
+  ggplot(aes(x = period, y = mean_y, group = group, color = group)) +
+  geom_point(size = 3) +                # slightly smaller points
+  geom_line(linewidth = 1) +            # slightly thinner line
+  scale_color_manual(
+    values = c(
+      "control" = "#0072B2",
+      "treated" = "#D55E00"
+    )
+  ) +
+  labs(
+    title = "2x2 DID: mean outcomes by group and period",
+    x = NULL,
+    y = "Mean outcome",
+    color = "group"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+
+# 2x2 DID Estimate
+\scriptsize
+```{r}
+#| label: did-by-hand-and-feols
+# By hand
+sim_2x2 |>
+  group_by(group, period) |>
+  summarise(mean_y = mean(Y), .groups = "drop") |>
+  tidyr::pivot_wider(names_from = c(group, period), values_from = mean_y) |>
+  mutate(did = (treated_post - treated_pre) - (control_post - control_pre))
+```
+
+\pause 
+```{r}
+# TWFE regression
+fit_twfe <- feols(Y ~ D | id + period, data = sim_2x2)
+# interaction regression 
+fit_interaction <- feols(Y ~ treated_group * post, data = sim_2x2)
+# First difference
+sim_diff <- sim_2x2 |>
+  select(id, treated_group, period, Y) |>
+  pivot_wider(names_from = period, values_from = Y) |>
+  mutate(
+    dY = post - pre,
+    treated_fd = treated_group)
+fit_fd <- feols(dY ~ treated_fd, data = sim_diff)
+```
+
+# 2x2 DID
+
+```{r}
+#| echo: false
+models <- list(
+  "TWFE" = fit_twfe,
+  "Interaction" = fit_interaction,
+  "First difference" = fit_fd
+)
+
+coef_map <- c(
+  "D" = "DID effect",
+  "treated_group:post" = "DID effect",
+  "treated_group" = "DID effect"
+)
+
+modelsummary(
+  models,
+  coef_map = c(
+    "D" = "DID effect",
+    "treated_group:post" = "DID effect",
+    "treated_fd" = "DID effect"
+  ),
+  statistic = "std.error",
+  stars = c("***" = 0.01, "**" = 0.05, "*" = 0.1),
+  gof_map = "nobs",
+  output = "kableExtra"
+) |>
+  add_header_above(c(" " = 1, "Equivalent DID estimators" = 3))
+```
+
+# `PanelView` visualizes
+
+- treatment timing
+- whether adoption is one-shot or staggered
+- whether there are reversals
+- missing data patterns
+- whether outcomes move differently across treatment cohorts
+
+# `PanelView`: 2x2 simulated data
+\scriptsize
+```{r}
+#| label: panelview-2x2
+#| fig-width: 6
+#| fig-height: 3
+sim_2x2_panel <- sim_2x2 |>
+  mutate(period_num = if_else(period == "pre", 1L, 2L))
+
+panelview(
+  Y = "Y", D = "D", data = sim_2x2_panel,
+  index = c("id", "period_num"),
+  by.timing = TRUE, display.all = TRUE
+)
+```
+
+# `PanelView`: 2x2 simulated data
+\scriptsize
+```{r}
+#| label: panelview-2x2 output
+#| fig-width: 6
+#| fig-height: 3
+
+panelview(
+  Y = "Y", D = "D", data = sim_2x2_panel, index = c("id", "period_num"),
+  type = "outcome", by.timing = TRUE, display.all = TRUE
+)
+```
+
+
+# Multi-period single-event DID
+
+- Multiple pre-treatment periods and/or multiple post-treatment periods
+- All treated units receive treatment at the same time \pause
+- We can study **Dynamic ATT** now: 
+$$\tau_k = \mathbb{E}\big[ Y_{i,k}(1) - Y_{i,k}(0) \mid T_i = 1 \big], 
+\quad k = 1, \dots, K.$$
+\pause
+
+- Pre-trends and sensitivity analysis
+
+# `PanelView` treatment status
+\scriptsize
+```{r}
+#| label: sim-single-event
+#| echo: false
+n_treated <- 200
+n_control <- 200
+periods <- 1:8
+adopt_period <- 5
+
+single_event <- tibble(
+  id = 1:(n_treated + n_control),
+  treated = rep(c(0, 1), c(n_control, n_treated)),
+  unit_fe = rnorm(n_treated + n_control, 0, 1),
+  group_trend = rep(c(0.15, 0.15), c(n_control, n_treated))
+) |>
+  tidyr::expand_grid(period = periods) |>
+  mutate(
+    time_fe = 0.4 * period,
+    D = as.integer(treated == 1 & period >= adopt_period),
+    time_to_treat = period - adopt_period,
+    tau = case_when(
+      D == 0 ~ 0,
+      time_to_treat == 0 ~ 0.8,
+      time_to_treat == 1 ~ 1.5,
+      time_to_treat == 2 ~ 2.0,
+      time_to_treat >= 3 ~ 2.4,
+      TRUE ~ 0
+    ),
+    y0 = unit_fe + time_fe + group_trend * period + rnorm(n(), 0, 1),
+    Y = y0 + tau
+  )
+```
+
+
+```{r}
+#| label: panelview-single-event
+#| fig-width: 6
+#| fig-height: 3
+panelview(
+  Y = "Y", D = "D", data = single_event,
+  index = c("id", "period"),  by.timing = TRUE, display.all = TRUE
+)
+
+```
+
+# `PanelView` outcome
+\scriptsize
+
+```{r}
+#| label: panelview-single-event-outcome
+#| fig-width: 6
+#| fig-height: 3
+panelview(
+  Y = "Y", D = "D", data = single_event, type = "outcome",
+  index = c("id", "period"), by.timing = TRUE, display.all = TRUE
+)
+```
+
+# Pooled TWFE
+\scriptsize
+```{r}
+pooled_twfe <- feols(Y ~ D | id + period, data = single_event, 
+                     cluster = ~id)
+etable(pooled_twfe)
+```
+\normalsize
+
+- Fine in a single-event setting if we have homogeneous effects 
+- If effects change overtime, pooled TWFE is a weighted average of those effects
+
+# Event study specification 
+Period-specific effects relative to a omitted reference period
+$$Y_{it} = \alpha_i + \lambda_t + \sum_{\substack{k=-J \\ k \ne \text{ref}}}^{K} \delta_k \cdot T_i \times \mathbf{1}(t = k) + \epsilon_{it}$$
+
+- $\delta_k$ for $k > 0$: dynamic treatment effects (relative to ref. period).
+- $\delta_k$ for $k < 0$: pre-treatment lead coefficients
+- pre-trends or anticipation \pause
+- Common choice for reference period
+    - last pre-treatment period
+    - period before the last pre-treatment period \pause
+    - Shifts what the post-treatment coefficients measure
+
+
+
+# TWFE event study 
+\tiny
+```{r}
+#| label: twfe-event-study-single-event
+#| fig-width: 6
+#| fig-height: 3
+es_twfe <- feols(
+  Y ~ i(time_to_treat, treated, ref = -1) | id + period,
+  data = single_event, cluster = ~id)
+summary(es_twfe)
+```
+\pause
+
+```{r}
+coef_es <- coef(es_twfe)
+post_coefs <- coef_es[grepl("time_to_treat::[0-9]+:treated", names(coef_es))]
+mean(post_coefs)
+```
+
+
+# TWFE event study 
+\scriptsize
+```{r}
+#| label: twfe-event-study-single-event-plot
+#| fig-width: 6
+#| fig-height: 3
+iplot(es_twfe, main = "")
+```
+
+\normalsize
+\pause
+
+- Under parallel trends and no anticipation, pre-treatment lead coefficients should be close to zero \pause
+- But a flat pre-trend is not proof
+
+# TWFE event study - no anticipation
+
+\scriptsize
+```{r}
+#| label: twfe-event-study-single-event-anticipation
+#| fig-width: 6
+#| fig-height: 3
+es_twfe_ref2 <- feols(
+  Y ~ i(time_to_treat, treated, ref = -2) | id + period, 
+  data = single_event, cluster = ~id
+)
+iplot(es_twfe_ref2, main = "")
+```
+
+# Pre-trend
+```{r}
+#| echo: FALSE
+#| fig-width: 6
+#| fig-height: 3
+
+set.seed(123)
+
+n_treated <- 200
+n_control <- 200
+periods <- -4:3
+adopt_period <- 0
+
+single_event_pretrend_violation <- tibble(
+  id = 1:(n_treated + n_control),
+  treated = rep(c(0, 1), c(n_control, n_treated)),
+  unit_fe = rnorm(n_treated + n_control, 0, 1),
+  group_trend = if_else(
+    rep(c(0, 1), c(n_control, n_treated)) == 1,
+    0.45,   # treated units have steeper underlying trend
+    0.10    # control units have flatter underlying trend
+  )
+) |>
+  tidyr::expand_grid(period = periods) |>
+  mutate(
+    time_fe = 0.4 * period,
+    time_to_treat = period - adopt_period,
+    D = as.integer(treated == 1 & period >= adopt_period),
+    tau = case_when(
+      D == 0 ~ 0,
+      time_to_treat == 0 ~ 0.8,
+      time_to_treat == 1 ~ 1.5,
+      time_to_treat == 2 ~ 2.0,
+      time_to_treat >= 3 ~ 2.4,
+      TRUE ~ 0
+    ),
+    y0 = unit_fe + time_fe + group_trend * period + rnorm(n(), 0, 1),
+    Y = y0 + tau
+  )
+
+es_twfe_pretrend <- feols(
+  Y ~ i(time_to_treat, treated, ref = -1) | id + period,
+  data = single_event_pretrend_violation,
+  cluster = ~id
+)
+
+iplot(
+  es_twfe_pretrend,
+  xlab = "time_to_treat",
+  ylab = "Estimate and 95% Conf. Int."
+)
+```
+
+
+# `HonestDiD`
+
+If post-treatment trend violations were no larger than some multiple of the pre-treatment pattern, would the treatment effect still be statistically distinguishable from zero? \pause
+
+- Estimate an event study
+- Use the pre-treatment coefficients to inform possible violations after the treatment
+- A sensitivity parameter $\bar M$
+- Check how the confidence set changes as $\bar M$ increases
+
+# `HonestDiD` - Single Event
+\scriptsize
+```{r}
+betahat <- summary(es_twfe)$coefficients
+sigma <- summary(es_twfe)$cov.scaled
+delta_rm_results <- HonestDiD::createSensitivityResults_relativeMagnitudes(
+  betahat = betahat, #coefficients 
+  sigma = sigma, #covariance matrix 
+  numPrePeriods = 3, #num. of pre-treatment coefs 
+  numPostPeriods = 4, #num. of post-treatment coefs 
+  Mbarvec = seq(1,2,by=0.25) #values of Mbar
+)
+delta_rm_results
+```
+
+# `HonestDiD` - Single Event
+\scriptsize
+```{r}
+#| fig-width: 6
+#| fig-height: 2
+originalResults <- HonestDiD::constructOriginalCS(
+  betahat = betahat, sigma = sigma, 
+  numPrePeriods = 3, numPostPeriods = 4)
+HonestDiD::createSensitivityPlot_relativeMagnitudes(delta_rm_results, originalResults) + theme_minimal(base_size = 10)
+```
+
+# `HonestDiD` - Single Event Example 2
+\tiny
+```{r}
+#| fig-width: 6
+#| fig-height: 2
+betahat_pt <- summary(es_twfe_pretrend)$coefficients
+sigma_pt <- summary(es_twfe_pretrend)$cov.scaled
+
+delta_rm_results <- HonestDiD::createSensitivityResults_relativeMagnitudes(
+  betahat = betahat_pt, #coefficients 
+  sigma = sigma_pt, #covariance matrix 
+  numPrePeriods = 3, #num. of pre-treatment coefs 
+  numPostPeriods = 4, #num. of post-treatment coefs 
+  Mbarvec = seq(1,2,by=0.25) #values of Mbar )
+)
+originalResults <- HonestDiD::constructOriginalCS(
+  betahat = betahat_pt, sigma = sigma_pt, 
+  numPrePeriods = 3, numPostPeriods = 4)
+HonestDiD::createSensitivityPlot_relativeMagnitudes(delta_rm_results, originalResults) + theme_minimal(base_size = 10)
+```
+
+
+# Staggered Adoption - common in applied works
+
+- Different units adopt in different periods 
+- Dynamic treatment effects are allowed \pause 
+
+Under staggered adoption, the TWFE coefficient is a weighted average of many 2x2 comparisons.
+
+## Some are clean:
+
+- newly treated versus never treated
+- earlier treated versus later treated while the later cohort is still untreated
+
+## Some are bad:
+
+- later treated units compared to already treated units
+
+# Simulated Example `PanelView`
+\scriptsize
+```{r}
+#| echo: false
+set.seed(123)
+
+n_per_cohort <- 100
+periods <- 1:10
+cohorts <- c(2, 4, 6, 8, Inf)
+
+sim_staggered <- tibble(
+  id = 1:(n_per_cohort * length(cohorts)),
+  g = rep(cohorts, each = n_per_cohort)
+) |>
+  expand_grid(period = periods) |>
+  mutate(
+    treated = if_else(!is.infinite(g) & period >= g, 1, 0),
+    time_to_treat = if_else(is.infinite(g), NA_real_, period - g),
+    g_cs = if_else(is.infinite(g), 0, g),       # for Callaway-Sant'Anna
+    g_sa = if_else(is.infinite(g), 1000, g)     # for Sun-Abraham/fixest
+  )
+
+unit_fe <- tibble(
+  id = unique(sim_staggered$id),
+  alpha_i = rnorm(n_distinct(sim_staggered$id), 0, 1)
+)
+
+time_fe <- tibble(
+  period = periods,
+  lambda_t = c(-0.5, -0.2, 0, 0.2, 0.4, 0.5, 0.7, 0.8, 1.0, 1.1)
+)
+
+sim_staggered <- sim_staggered |>
+  left_join(unit_fe, by = "id") |>
+  left_join(time_fe, by = "period") |>
+  mutate(
+    y0 = alpha_i + lambda_t + rnorm(n(), 0, 0.8),
+    tau = case_when(
+      treated == 0 ~ 0,
+
+      g == 2 & time_to_treat == 0 ~ 0.2,
+      g == 2 & time_to_treat == 1 ~ 0.6,
+      g == 2 & time_to_treat >= 2 ~ 1.0,
+
+      g == 4 & time_to_treat == 0 ~ 0.5,
+      g == 4 & time_to_treat == 1 ~ 1.0,
+      g == 4 & time_to_treat >= 2 ~ 1.5,
+
+      g == 6 & time_to_treat == 0 ~ 1.0,
+      g == 6 & time_to_treat == 1 ~ 1.8,
+      g == 6 & time_to_treat >= 2 ~ 2.5,
+
+      g == 8 & time_to_treat == 0 ~ 1.8,
+      g == 8 & time_to_treat == 1 ~ 2.8,
+      g == 8 & time_to_treat >= 2 ~ 3.5,
+
+      TRUE ~ 0
+    ),
+    y = y0 + tau
+  )
+```
+
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+panelview(
+  Y = "y", D = "treated", data = sim_staggered,
+  index = c("id", "period"),  by.timing = TRUE, display.all = TRUE)
+```
+
+# Pooled TWFE Estimate 
+\scriptsize
+```{r}
+twfe_fit <- feols(y ~ treated | id + period, data = sim_staggered, cluster = ~id)
+etable(twfe_fit)
+```
+
+# Goodman-Bacon Decomposition
+\scriptsize
+```{r}
+library(bacondecomp)
+bacon_out <- bacon(
+  y ~ treated, data = sim_staggered, id_var = "id", time_var = "period")
+```
+
+# Goodman-Bacon Decomposition
+\scriptsize
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+ggplot(bacon_out, aes(x = weight, y = estimate, color = type, shape = type)) +
+  geom_point(size = 3, alpha = 0.8) +
+  labs(title = "Goodman-Bacon decomposition",
+       x = "Weight", y = "2x2 DID estimate") +
+  theme_minimal(base_size = 12)
+```
+
+
+# dCDH `TwoWayFEWeights`
+\scriptsize
+```{r}
+library(TwoWayFEWeights)
+twfe_wts <- twowayfeweights(data = sim_staggered, Y = "y", G = "id",
+                            T = "period", D = "treated", type = "feTR", summary_measures = TRUE)
+twfe_wts
+```
+
+```{r}
+#| eval: false
+#| include: false
+str(twfe_wts)
+names(twfe_wts)
+
+weight_df <- twfe_wts[[which(sapply(twfe_wts, is.data.frame))[1]]]
+weight_plot_df <- sim_staggered |>
+  distinct(id, g, period, treated, time_to_treat, tau) |>
+  left_join(
+    weight_df |>
+      rename(id = G, period = `T`, weight = weight),
+    by = c("id", "period")
+  )
+
+weight_plot_df |>
+  filter(treated == 1, is.finite(g)) |>
+  ggplot(aes(x = time_to_treat, y = weight, color = factor(g))) +
+  geom_point(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(
+    title = "TWFE weights on treated group-time cells",
+    x = "Event time",
+    y = "Weight",
+    color = "Cohort"
+  ) +
+  theme_minimal(base_size = 12)
+
+weight_plot_df |>
+  filter(treated == 1) |>
+  summarise(
+    weighted_tau = sum(weight * tau, na.rm = TRUE)
+  )
+coef(twfe_fit)[["treated"]]
+```
+
+# Callaway \& Sant'Anna
+- Default control group is "nevertreated", can be set to "notyettreated"
+- default estimation method is doubly robust from `DRDID`
+\scriptsize
+```{r}
+library(did)
+cs_dr <- att_gt(yname = "y",      # outcome variable
+                gname = "g",      # group variable
+                idname = "id",    # unit identifier
+                tname = "period", # year variable
+                xformla = ~1,     # covariates (if any)
+                data = sim_staggered,  
+                est_method = "dr",     
+                control_group = "nevertreated"
+)
+```
+
+# Callaway \& Sant'Anna
+Aggregated overall ATT:
+\scriptsize
+```{r}
+aggte(cs_dr, type ="simple", na.rm=T)
+```
+
+# Callaway \& Sant'Anna
+Dynamic ATT (Event-Study):
+\scriptsize
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+cs_dynamic <- aggte(cs_dr, type = "dynamic")
+ggdid(cs_dynamic)
+```
+
+
+# Sun-Abraham with `fixest`
+Aggregated overall ATT:
+\scriptsize
+```{r}
+sa_fit <- feols(y ~ sunab(g_sa,period) | id + period, 
+                data = sim_staggered, cluster = ~id)
+summary(sa_fit, agg = "ATT")
+```
+
+# Sun-Abraham with `fixest`
+Event study plot:
+\scriptsize
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+# compare to twfe event study
+twfe_es_fit <- feols(y ~ i(time_to_treat, treated, ref = -1) | id + period,
+  data = sim_staggered, cluster = ~id)
+
+iplot(list(twfe_es_fit, sa_fit)); legend("topleft", col = c(1,2), pch = c(20, 17), 
+                                         legend = c("TWFE", "Sun & Abraham (2020)"))
+```
+
+
+# HonestDiD with staggered treatment
+\scriptsize
+```{r}
+source(("honest-helpers.R"))
+# Need to specify the "universal" type base period to use honestDiD
+es_out <- att_gt(yname = "y", gname = "g", idname = "id",
+               tname = "period", xformla = ~1, control_group = "nevertreated",
+               data = sim_staggered, est_method = "reg",
+               base_period = "universal")
+es <- aggte(es_out, type = "dynamic")
+sensitivity_results <- honest_did.AGGTEobj(
+  es, e = 1, type = "relative_magnitude", Mbarvec = seq(0.5, 2, by = 0.5),
+  grid.ub = 10, grid.lb = -10, gridPoints = 2000)
+```
+
+# Honest DiD
+\scriptsize
+```{r}
+#| fig-width: 6
+#| fig-height: 2
+HonestDiD::createSensitivityPlot_relativeMagnitudes(sensitivity_results$robust_ci,
+    sensitivity_results$orig_ci)+theme_minimal(base_size = 10)
+```
+
+
+# Other resources
+- `PanelMatch` for matching
+- `DIDmultiplegt` de Chaisemartin & D’Haultfœuille DID methods.
+- [Yiqing Xu's Tutorials on YouTube](https://www.youtube.com/playlist?list=PLo0lw6BstMGZQqx_r1GnOETkFYihCgve9)
+- [Sant'Anna's Lectures on DiD](https://psantanna.com/did-resources/)
+
+# Example Study
+
+Mafia and political quality: Daniele \& Geys (EJ 2015)
+
+![](data/daniele_geys_abstract.png){fig-align="center" width=100%}
+
+
+# Example Study
+
+- What is the effect of removing mafia connections on the quality of politicians?
+- Staggered dissolution of municipal governments in Italian south after criminal investigations
+- Outcome: education of government members (average) \pause
+- ``Unlike the traditional DiD model, which relies on a shock at one point in time across all treated jurisdictions, we can exploit the fact that dissolutions did not take place at the same point in time for each municipality [. . . ] to further strengthen our identification''
+
+
+```{r}
+#| label: load-mafia
+#| echo: false
+
+mafia_raw <- haven::read_dta("data/Organized Crime and Political Quality.dta")
+
+mafia_df <- mafia_raw |>
+  mutate(
+    year = as.integer(year),
+    ID_municip = as.integer(ID_municip),
+    mafiaben = coalesce(as.numeric(mafiaben), 0),
+    befcomgeneral = coalesce(as.numeric(befcomgeneral), 0),
+    befcomgeneral_recode = (1 - befcomgeneral) * mafiaben
+  )
+```
+
+# `panelView` treatment status
+\scriptsize
+```{r}
+#| label: panelview-mafia-treatment
+#| fig-width: 6
+#| fig-height: 3
+panelview(
+  MeanEduPol ~ befcomgeneral_recode, data = mafia_df,
+  index = c("ID_municip", "year"), xlab = "Year", ylab = "Municipality",
+  display.all = TRUE, gridOff = TRUE, by.timing = TRUE)
+```
+
+# `panelView`: outcomes by treatment cohort
+\scriptsize
+```{r}
+#| label: panelview-mafia-outcome
+#| fig-width: 6
+#| fig-height: 3
+panelview(
+  MeanEduPol ~ befcomgeneral_recode, data = mafia_df, index = c("ID_municip", "year"),
+  by.timing = TRUE, display.all = FALSE, type = "outcome", by.cohort = TRUE)
+```
+
+
+# Pooled TWFE
+\scriptsize
+```{r}
+#| label: mafia-twfe-lab
+# each municipality have its own linear time trend.
+mafia_twfe <- feols(
+  MeanEduPol ~ befcomgeneral_recode | ID_municip[trend] + year, 
+  data = mafia_df, cluster = ~ID_municip)
+etable(mafia_twfe)
+```
+
+
+# Data Prep
+Define treatment groups based on their first year of treatment
+```{r}
+mafia_df <- mafia_df %>% group_by(desc_comune) %>% 
+  mutate(group = case_when(mafiaben==1 ~ min(year[befcomgeneral_recode==1]),
+                           mafiaben==0 ~ 0)) %>%
+  ungroup()
+```
+
+# Callaway \& Sant'Anna
+\tiny
+```{r}
+library(did)
+set.seed(1)
+cs_dr <- att_gt(yname = "MeanEduPol",      # outcome variable
+                gname = "group",           # group variable
+                idname = "ID_municip",     # unit identifier
+                tname = "year",            # year variable
+                xformla = ~1,              # covariates (if any)
+                data = mafia_df,           # data
+                est_method = "dr",         # estimation method
+                allow_unbalanced_panel = T, # allow unbalanced panel
+                control_group = "nevertreated" # control group
+)
+tidy(cs_dr)
+```
+
+
+# Callaway \& Sant'Anna - visualization
+By default, it makes a plot for each group, here we select a few
+
+\tiny
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+ggdid(cs_dr, group = 1992, xgap=3, title="", theming=F)+ theme_bw() 
+```
+
+
+# Callaway \& Sant'Anna - visualization
+\tiny
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+ggdid(cs_dr, group = 2005, xgap=3, title="", theming=F)+ theme_bw() 
+```
+
+# Aggregate estimates
+\scriptsize
+```{r}
+aggte(cs_dr, type ="dynamic", na.rm=T)
+```
+
+
+# TWFE Weights
+\scriptsize
+```{r}
+#| label: mafia-twowayfeweights
+#| eval: false
+wgt_diag <- twowayfeweights(
+  mafia_df, "MeanEduPol", "ID_municip", "year",
+  "befcomgeneral_recode", type = "feTR", summary_measures = TRUE)
+wgt_diag
+```
+
+
+# Create Staggered Variables
+\scriptsize
+```{r}
+#| label: mafia-cohort-event-time
+cohorts <- mafia_df |>
+  group_by(ID_municip) |>
+  summarise(
+    first_treat = if (any(befcomgeneral_recode == 1)) 
+      min(year[befcomgeneral_recode == 1]) else 0L,
+    ever_treated = as.integer(first_treat > 0),
+    .groups = "drop")
+
+mafia_staggered <- mafia_df |>
+  left_join(cohorts, by = "ID_municip") |>
+  mutate(
+    time_to_treat = if_else(ever_treated == 1, year - first_treat, 0L))
+```
+
+# Create Staggered Variables
+\tiny
+```{r}
+#| label: mafia-cohort-event-time-display
+mafia_staggered |>
+  select(desc_comune, year, befcomgeneral_recode, first_treat, ever_treated, time_to_treat) |>
+  arrange(desc_comune, year) |>
+  filter(desc_comune == "ACERRA") |> 
+  head(15)
+```
+
+# TWFE Event Study & Sun-Abraham with `fixest`
+\scriptsize
+```{r}
+#| label: mafia-twfe-dynamic
+twfe_es_fit <- feols(
+  MeanEduPol ~ i(time_to_treat, ever_treated, ref = -1) | ID_municip + year,
+  data = mafia_staggered, cluster = ~ID_municip)
+mafia_sa <- mafia_staggered |>
+  mutate(first_treat_sa = if_else(first_treat == 0, 10000L, first_treat))
+sa_fit <- feols(
+  MeanEduPol ~ sunab(first_treat_sa, year) | ID_municip + year,
+  data = mafia_sa,
+  cluster = ~ID_municip)
+```
+
+
+# TWFE Event Study & Sun-Abraham with `fixest` Plot
+\tiny
+```{r}
+#| label: mafia-sunab
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+iplot(list(twfe_es_fit, sa_fit)); legend("bottomright", col = c(1,2), pch = c(20, 17), legend = c("TWFE", "Sun & Abraham (2020)"))
+```
+
+
+
