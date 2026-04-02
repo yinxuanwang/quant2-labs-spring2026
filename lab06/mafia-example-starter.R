@@ -1,7 +1,6 @@
 pacman::p_load(tidyverse, fixest, panelView, did, HonestDiD,
   PanelMatch, haven, bacondecomp, TwoWayFEWeights)
 
-
 mafia_raw <- haven::read_dta("data/Organized Crime and Political Quality.dta")
 
 mafia_df <- mafia_raw |>
