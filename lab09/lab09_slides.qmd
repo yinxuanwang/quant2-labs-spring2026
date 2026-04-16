@@ -1,0 +1,495 @@
+---
+title: Quant II
+subtitle: Lab 9
+author: Yinxuan Wang
+date: '2026-04-16'
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+---
+
+
+
+## Today's Agenda
+- Experiment
+- DeclareDesign 
+  - adapted from <https://declaredesign.org>
+- Covariate adjustment
+
+## Purpose of `DeclareDesign`
+Simulation based toolkit
+
+- make assumptions explicit,
+- define the estimand clearly,
+- declare how data are generated,
+- declare how the answer will be computed,
+- diagnose whether the design performs well,
+- redesign when it does not.
+
+## `DecalreDesign` Workflow
+1. start with the research question,
+2. write down the causal model,
+3. declare the estimand,
+4. declare assignment and measurement,
+5. declare the estimator,
+6. diagnose bias, RMSE, coverage, and power,
+7. redesign over the choices we actually control.
+
+## Setup
+
+```{r}
+pacman::p_load(DeclareDesign, tidyverse, future, future.apply)
+library(fabricatr)
+library(randomizr)
+library(estimatr)
+
+set.seed(12345)
+theme_set(theme_minimal(base_size = 14))
+```
+
+# Baseline 
+
+```{r}
+N <- 300
+tau <- 0.20
+x_strength <- 1.00
+
+base_dd <-
+  declare_model(
+    N = N,
+    U = rnorm(N),
+    potential_outcomes(Y ~ tau * Z + U)
+  ) +
+  declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0)) +
+  declare_assignment(Z = complete_ra(N = N, prob = 0.5)) +
+  declare_measurement(Y = reveal_outcomes(Y ~ Z)) +
+  declare_estimator(Y ~ Z, inquiry = "ATE", label = "DIM")
+
+base_dd
+```
+
+
+# Diagnose the baseline design
+
+```{r}
+diagnosis_base_dd <- diagnose_design(base_dd)
+```
+```{r}
+head(diagnosis_base_dd$simulations_df)
+hist(diagnosis_base_dd$simulations_df$estimate)
+hist(diagnosis_base_dd$simulations_df$p.value)
+diagnosis_base_dd$diagnosands_df
+```
+
+<https://book.declaredesign.org/declaration-diagnosis-redesign/diagnosing-designs.html#sec-ch10s2>
+
+## `redesign`: Evaluating Multiple Designs
+
+### `redesign` over sample size
+
+```{r}
+diagnosis_over_n <-
+  base_dd %>%
+  redesign(N = seq(100, 1000, by = 100)) %>%
+  diagnose_designs()
+```
+```{r}
+diagnosis_over_n$diagnosands_df %>%
+  select(N, estimator, power, sd_estimate, rmse)
+```
+
+
+```{r}
+diagnosis_over_n$diagnosands_df %>% 
+  ggplot(aes(x = N, y = mean_estimate, ymin = mean_estimate - 1.96 * sd_estimate, ymax = mean_estimate + 1.96 * sd_estimate)) +
+  geom_point(size = 4) +
+  geom_errorbar(width = 0, linewidth = 1) + 
+  labs(
+    title = "95% CI",
+    x = "Sample size",
+    y = "Estimate") + 
+  theme_bw()
+
+diagnosis_over_n$diagnosands_df %>%
+  ggplot(aes(x = N, y = power, color = estimator)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Power by sample size",
+    x = "Sample size",
+    y = "Power") + 
+  theme_bw() +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  annotate("text", x = Inf, y = 0.8, label = "Power = 0.8", hjust = 1.1, vjust = 1.5)
+```
+
+### `redesign` the effect size
+
+```{r}
+diagnosis_over_tau <- 
+  base_dd %>%
+    redesign(
+        N = seq(100, 1000, 100),
+        tau = c(0.1, 0.2, 0.3)
+    ) %>%
+    diagnose_designs()
+```
+```{r}
+diagnosis_over_tau$diagnosands_df %>% 
+  ggplot(aes(x = N, y = power, color = as.factor(tau))) +
+  geom_line(linewidth = 2) +
+  labs(color = "tau",
+       title = "Power by effect size") + 
+  theme_bw() +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  annotate("text", x = Inf, y = 0.8, label = "Power = 0.8", hjust = 1.1, vjust = -0.5)
+```
+
+## Covariate Adjustment
+
+1. Difference in means
+2. OLS with covariate adjustment
+3. Lin adjustment using `lm_lin()`
+
+```{r}
+adj_dd <-
+  declare_model(
+    N = N,
+    X = rnorm(N),
+    U = rnorm(N),
+    potential_outcomes(Y ~ tau * Z + x_strength * X + U)
+  ) +
+  declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0)) +
+  declare_assignment(Z = complete_ra(N = N, prob = 0.5)) +
+  declare_measurement(Y = reveal_outcomes(Y ~ Z)) +
+  declare_estimator(Y ~ Z, inquiry = "ATE", label = "DIM") +
+  declare_estimator(Y ~ Z + X, .method = lm_robust, inquiry = "ATE", label = "OLS adjusted") +
+  declare_estimator(Y ~ Z, covariates = ~ X, .method = lm_lin, inquiry = "ATE", label = "Lin")
+```
+
+### `redesign` over covariate strength
+
+```{r}
+diagnosis_adj <-
+  adj_dd %>%
+  redesign(
+    N = seq(100, 1000, by = 100),
+    x_strength = c(0, 0.5, 1.0, 1.5)
+  ) %>%
+  diagnose_designs()
+```
+```{r}
+diagnosis_adj$diagnosands_df %>%
+  ggplot(aes(x = N, y = sd_estimate, color = estimator)) +
+  geom_line(linewidth = 1.1) +
+  facet_wrap(~ x_strength, labeller = label_both) +
+  labs(
+    title = "Precision gains from covariate adjustment",
+    x = "Sample size",
+    y = "SD of estimate"
+  ) + theme_bw()
+```
+```{r}
+diagnosis_adj$diagnosands_df %>%
+  ggplot(aes(x = N, y = power, color = estimator)) +
+  geom_line(linewidth = 1.1) +
+  facet_wrap(~ x_strength, labeller = label_both) +
+  labs(
+    x = "Sample size",
+    y = "Power"
+  ) + 
+  theme_bw() +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  annotate("text", x = Inf, y = 0.8, label = "Power = 0.8", hjust = 1.1, vjust = -0.5)
+```
+
+
+### When OLS is less efficient than Lin
+
+- Covariate slopes differ between treated and control potential outcomes, 
+- and assignment is imbalanced
+
+```{r}
+N <- 400
+tau <- 0.2
+treatment_share <- 0.5
+control_slope <- 0
+treatment_slope <- 1
+
+heterogeneous_slope_dd <-
+  declare_model(
+    N = N,
+    X = runif(N, min = -1, max = 1),
+    U = rnorm(N, sd = 0.25),
+    Y_Z_0 = control_slope * X + U,
+    Y_Z_1 = tau + treatment_slope * X + U
+  ) +
+  declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0)) +
+  declare_assignment(Z = complete_ra(N = N, prob = treatment_share)) +
+  declare_measurement(Y = reveal_outcomes(Y ~ Z)) +
+  declare_estimator(Y ~ Z, inquiry = "ATE", label = "DIM") +
+  declare_estimator(Y ~ Z + X, .method = lm_robust, inquiry = "ATE", label = "OLS adjusted") +
+  declare_estimator(Y ~ Z, covariates = ~ X, .method = lm_lin, inquiry = "ATE", label = "Lin")
+```
+
+```{r}
+heterogeneous_slope_diagnosis <-
+  heterogeneous_slope_dd %>%
+  redesign(
+    treatment_share = c(0.20, 0.35, 0.50),
+    control_slope = c(-1, 0, 1)
+  ) %>%
+  diagnose_designs()
+```
+
+```{r}
+heterogeneous_slope_diagnosis$diagnosands_df |>
+  ggplot(aes(x = treatment_share, y = sd_estimate, color = estimator)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2) +
+  facet_wrap(~ control_slope, labeller = label_both) +
+  labs(
+    title = "Estimator precision under slope heterogeneity and imbalance",
+    x = "Treatment share",
+    y = "SD of estimate") +
+  theme_bw()
+```
+
+```{r}
+heterogeneous_slope_diagnosis$diagnosands_df |>
+  ggplot(aes(x = treatment_share, y = power, color = estimator)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2) +
+  facet_wrap(~ control_slope, labeller = label_both) +
+  labs(
+    x = "Treatment share",
+    y = "Power") +
+  theme_bw() +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  annotate("text", x = Inf, y = 0.8, label = "Power = 0.8", hjust = 1.1, vjust = 1.5)
+```
+
+
+## Block Randomization
+```{r}
+block_N <- 200
+tau <- 0.2
+coef <- 2
+
+block_dd <-
+  declare_model(
+    N = block_N,
+    gender = sample(c(0, 1), size = N, replace = TRUE),
+    U = rnorm(N, sd = 1),
+    potential_outcomes(Y ~ tau * Z + coef * gender + U)
+  ) +
+  declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0)) +
+  declare_assignment(
+    Z = block_ra(blocks = gender)
+  ) +
+  declare_measurement(Y = reveal_outcomes(Y ~ Z)) +
+  declare_estimator(Y ~ Z, inquiry = "ATE", label = "DIM") +
+  declare_estimator(
+    Y ~ Z,
+    covariates = ~ gender,
+    .method = lm_lin,
+    inquiry = "ATE",
+    label = "Lin"
+  )
+```
+```{r}
+simple_dd <-
+  declare_model(
+    N = block_N,
+    gender = sample(c(0, 1), size = N, replace = TRUE),
+    U = rnorm(N, sd = 1),
+    potential_outcomes(Y ~ tau * Z + coef * gender + U)
+  ) +
+  declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0)) +
+  declare_assignment(
+    Z = complete_ra(N = N, prob = 0.5)
+  ) +
+  declare_measurement(Y = reveal_outcomes(Y ~ Z)) +
+  declare_estimator(Y ~ Z, inquiry = "ATE", label = "DIM") +
+  declare_estimator(
+    Y ~ Z,
+    covariates = ~ gender,
+    .method = lm_lin,
+    inquiry = "ATE",
+    label = "Lin"
+  )
+```
+
+```{r}
+diagnosis_block <-
+  block_dd %>%
+  redesign(
+    block_N = seq(40, 200, 20),
+    coef = c(0.5, 1, 2, 4)
+  ) %>%
+  diagnose_designs()
+```
+
+```{r}
+diagnosis_simple <-
+  simple_dd %>%
+  redesign(
+    block_N = seq(40, 200, 20),
+    coef = c(0.5, 1, 2, 4)
+  ) %>%
+  diagnose_designs()
+```
+
+```{r}
+bind_rows(
+  diagnosis_block$diagnosands_df %>% mutate(design = "Blocked assignment"),
+  diagnosis_simple$diagnosands_df %>% mutate(design = "Complete randomization")
+) %>%
+  ggplot(aes(x = block_N, y = sd_estimate, color = design)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ estimator + coef, ncol = 4) +
+  labs(
+    x = "Sample size",
+    y = "SD of estimate",
+    color = "Design"
+  ) +
+  theme_bw()
+```
+
+```{r}
+bind_rows(
+  diagnosis_block$diagnosands_df %>% mutate(design = "Blocked assignment"),
+  diagnosis_simple$diagnosands_df %>% mutate(design = "Complete randomization")
+) %>%
+  ggplot(aes(x = block_N, y = power, color = design)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ estimator + coef, ncol = 4) +
+  labs(
+    x = "Sample size",
+    y = "Power",
+    color = "Design"
+  ) +
+  theme_bw() +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  annotate("text", x = Inf, y = 0.8, label = "Power = 0.8", hjust = 1.1, vjust = 1.5)
+```
+
+
+## Factorial Design 
+```{r}
+N <- 800
+tau_A <- 0.20
+tau_B <- 0.20
+tau_AB <- 0.20
+
+factorial_dd <-
+  declare_model(
+    N = N,
+    X = rnorm(N),
+    U = rnorm(N),
+    Y_A_0_B_0 = 0 + U,
+    Y_A_1_B_0 = tau_A + U,
+    Y_A_0_B_1 = tau_B + U,
+    Y_A_1_B_1 = tau_A + tau_B + tau_AB + U
+  ) +
+  declare_inquiry(
+    main_A = mean((Y_A_1_B_0 + Y_A_1_B_1)/2 - (Y_A_0_B_0 + Y_A_0_B_1)/2),
+    main_B = mean((Y_A_0_B_1 + Y_A_1_B_1)/2 - (Y_A_0_B_0 + Y_A_1_B_0)/2),
+    interaction = mean((Y_A_1_B_1 - Y_A_0_B_1) - (Y_A_1_B_0 - Y_A_0_B_0))
+  ) +
+  declare_assignment(
+    A = complete_ra(N = N, prob = 0.5),
+    B = complete_ra(N = N, prob = 0.5)
+  ) +
+  declare_measurement(
+    Y = reveal_outcomes(Y ~ A + B)
+  ) +
+  declare_estimator(
+    Y ~ A + B + A:B,
+    model = lm_robust,
+    inquiry = c("main_A", "main_B", "interaction"),
+    term = c("A", "B", "A:B"),
+    label = "OLS factorial"
+  )
+```
+
+```{r}
+factorial_diag <-
+  factorial_dd %>%
+  redesign(N = seq(500, 7000, by = 500)) %>%
+  diagnose_designs()
+```
+
+```{r}
+factorial_diag$diagnosands_df %>%
+  ggplot(aes(x = N, y = power, color = term)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Power in a 2x2 factorial design",
+    x = "Sample size",
+    y = "Power",
+    color = "Estimand"
+  ) +
+  theme_bw() +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  annotate("text", x = Inf, y = 0.8, label = "Power = 0.8", hjust = 1.1, vjust = -0.5)
+```
+
+## DeclareDesign in Observatinal Settings Example
+```{r}
+N <- 500
+tau <- 0.5
+selection_strength <- 1.2
+confounding_strength <- 1.0
+
+obs_dd <-
+  declare_model(
+    N = N,
+    X = rnorm(N),
+    U = rnorm(N),
+    D = rbinom(N, 1, plogis(-0.3 + selection_strength * X)),
+    Y_D_0 = confounding_strength * X + U,
+    Y_D_1 = Y_D_0 + tau
+  ) +
+  declare_inquiry(ATE = mean(Y_D_1 - Y_D_0)) +
+  declare_measurement(Y = reveal_outcomes(Y ~ D)) +
+  declare_estimator(Y ~ D,
+                    .method = lm_robust,
+                    inquiry = "ATE",
+                    label = "Raw OLS") +
+  declare_estimator(Y ~ D + X,
+                    .method = lm_robust,
+                    inquiry = "ATE",
+                    label = "Adjusted OLS")
+```
+
+```{r}
+obs_diag <- diagnose_design(obs_dd)
+obs_diag$diagnosands_df
+```
+
+```{r}
+obs_diag_grid <-
+  obs_dd %>%
+  redesign(
+    selection_strength = c(0.4, 0.8, 1.2, 1.6),
+    confounding_strength = c(0.5, 1.0, 1.5)
+  ) %>%
+  diagnose_designs()
+```
+
+```{r}
+obs_diag_grid$diagnosands_df %>%
+  ggplot(aes(x = selection_strength, y = bias, color = estimator)) +
+  geom_line(linewidth = 1.1) +
+  facet_wrap(~ confounding_strength, labeller = label_both) +
+  labs(
+    title = "Bias in an observational design",
+    x = "How strongly X predicts treatment",
+    y = "Bias"
+  ) +
+  theme_bw()
+```
