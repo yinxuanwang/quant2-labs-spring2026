@@ -426,7 +426,7 @@ factorial_diag$diagnosands_df %>%
   geom_line(linewidth = 1.1) +
   geom_point(size = 2) +
   labs(
-    title = "Power in a 2x2 factorial design",
+    title = "Power in a 2x2 factorial design, interaction 0.2",
     x = "Sample size",
     y = "Power",
     color = "Estimand"
