@@ -127,26 +127,24 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="purpose-of-declaredesign" class="level2">
 <h2 class="anchored" data-anchor-id="purpose-of-declaredesign">Purpose of <code>DeclareDesign</code></h2>
-<p>Simulation based toolkit</p>
+<p>A simulation-based framework for formalizing and evaluating research designs</p>
 <ul>
-<li>make assumptions explicit,</li>
-<li>define the estimand clearly,</li>
-<li>declare how data are generated,</li>
-<li>declare how the answer will be computed,</li>
-<li>diagnose whether the design performs well,</li>
-<li>redesign when it does not.</li>
+<li>make assumptions explicit</li>
+<li>simulate how a study would perform under those assumptions</li>
+<li>compare alternative designs before fielding the study</li>
+<li>learn where bias, noise, and low power come from</li>
 </ul>
 </section>
-<section id="decalredesign-workflow" class="level2">
-<h2 class="anchored" data-anchor-id="decalredesign-workflow"><code>DecalreDesign</code> Workflow</h2>
+<section id="declaredesign-workflow" class="level2">
+<h2 class="anchored" data-anchor-id="declaredesign-workflow"><code>DeclareDesign</code> Workflow</h2>
 <ol type="1">
-<li>start with the research question,</li>
-<li>write down the causal model,</li>
-<li>declare the estimand,</li>
-<li>declare assignment and measurement,</li>
-<li>declare the estimator,</li>
-<li>diagnose bias, RMSE, coverage, and power,</li>
-<li>redesign over the choices we actually control.</li>
+<li>start with the research question</li>
+<li>declare the data-generating process</li>
+<li>declare the estimand</li>
+<li>declare how the data are observed</li>
+<li>declare the estimator</li>
+<li>diagnose bias, uncertainty, coverage, and power</li>
+<li>redesign over the choices we can control</li>
 </ol>
 </section>
 <section id="setup" class="level2">

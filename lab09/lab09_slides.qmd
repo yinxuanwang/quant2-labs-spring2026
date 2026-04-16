@@ -19,23 +19,21 @@ execute:
 - Covariate adjustment
 
 ## Purpose of `DeclareDesign`
-Simulation based toolkit
+A simulation-based framework for formalizing and evaluating research designs
 
-- make assumptions explicit,
-- define the estimand clearly,
-- declare how data are generated,
-- declare how the answer will be computed,
-- diagnose whether the design performs well,
-- redesign when it does not.
+- make assumptions explicit
+- simulate how a study would perform under those assumptions
+- compare alternative designs before fielding the study
+- learn where bias, noise, and low power come from
 
-## `DecalreDesign` Workflow
-1. start with the research question,
-2. write down the causal model,
-3. declare the estimand,
-4. declare assignment and measurement,
-5. declare the estimator,
-6. diagnose bias, RMSE, coverage, and power,
-7. redesign over the choices we actually control.
+## `DeclareDesign` Workflow
+1. start with the research question
+2. declare the data-generating process
+3. declare the estimand
+4. declare how the data are observed
+5. declare the estimator
+6. diagnose bias, uncertainty, coverage, and power
+7. redesign over the choices we can control
 
 ## Setup
 
