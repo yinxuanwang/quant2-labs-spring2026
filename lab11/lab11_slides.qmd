@@ -1,0 +1,855 @@
+---
+title: Quant II
+subtitle: Lab 11
+author: Yinxuan Wang
+date: '2026-04-30'
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+---
+
+# Today's Agenda
+
+- Multiple hypothesis testing 
+- Missing data
+- Differential measurement error
+- Partial identification
+
+## Multiple Testing Adjustments
+
+- Test a family of $M$ hypotheses in one analysis
+- **FWER** family-wise error rate
+  - P(at least one false rejection) $< \alpha$
+- **FDR** false discovery rate
+  - E[false rejections/total rejections] $\leq q$
+- FWER control is more stringent than FDR control
+
+## FWER control methods recap
+
+- **Bonferroni**: 
+  - test each hypothesis at $\alpha/M$, or multiply each p-value by $M$
+- **Holm**: 
+  - Step-down Bonferroni
+  - Controls FWER under arbitrary dependence and is at least as powerful as Bonferroni
+- **Romano-Wolf**: 
+  - Step-down resampling method
+  - Uses the joint distribution of test statistics
+  - Can be more powerful than Holm when outcomes are correlated.
+
+## FDR control methods Recap
+
+- **Benjamini-Hochberg**: 
+  - controls FDR under independence or positive dependence
+- **Benjamini-Yekutieli**: 
+  - Controls FDR under arbitrary dependence 
+  - but pays a large power cost
+
+## A 10-outcome example
+
+Simulate one experiment with ten outcomes
+
+- `Y1` to `Y4` are true nulls
+- `Y5` to `Y10` have nonzero treatment effects
+- Some outcomes are correlated because they share latent factors
+- Some effects are very small, so the adjustment methods can disagree
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(fixest)
+library(RColorBrewer)
+library(kableExtra)
+# devtools::install_github("s3alfisc/wildrwolf")
+library(wildrwolf)
+
+set.seed(1234)
+
+simulate_10_outcomes <- function(N, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  D <- rbinom(N, 1, 0.5)
+
+  g <- rnorm(N)
+  m <- rnorm(N)
+  v <- rnorm(N)
+  eps <- matrix(rnorm(N * 10), nrow = N)
+
+  data.frame(
+    id = 1:N,
+    D = D,
+
+    # Four true nulls
+    Y1 = eps[, 1],
+    Y2 = 0.60 * g + eps[, 2],
+    Y3 = 0.60 * g + 0.60 * m + eps[, 3],
+    Y4 = 0.60 * g + 0.60 * m + eps[, 4],
+
+    # Six non-null outcomes
+    Y5  = 0.65 * D + 0.60 * g + 0.60 * m + eps[, 5],
+    Y6  = 0.55 * D + 0.60 * g + 0.60 * m + eps[, 6],
+    Y7  = 0.45 * D + 0.55 * g + 0.55 * v + eps[, 7],
+    Y8  = 0.35 * D + 0.55 * g + 0.55 * v + eps[, 8],
+    Y9  = 0.30 * D + 0.40 * g + eps[, 9],
+    Y10 = 0.25 * D + 0.40 * m + eps[, 10]
+  )
+}
+
+dat <- simulate_10_outcomes(N=400, seed=1234)
+outcomes <- paste0("Y", 1:10)
+```
+
+### Estimate the model using `fixest`
+
+The `c(Y1, ..., Y10) ~ D` syntax estimates the same right-hand-side model for multiple outcomes.
+
+The result is a `fixest_multi` object.
+```{r}
+models <- feols(
+  c(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8, Y9, Y10) ~ D,
+  data = dat
+)
+
+models
+```
+
+```{r}
+models_list <- as.list(models)
+names(models_list) <- outcomes
+
+extract_fixest_result <- function(model, outcome, term = "D") {
+  ct <- coeftable(model)
+
+  data.frame(
+    outcome = outcome,
+    estimate = ct[term, "Estimate"],
+    se = ct[term, "Std. Error"],
+    t_stat = ct[term, "t value"],
+    p_raw = ct[term, "Pr(>|t|)"]
+  )
+}
+
+res_unadjusted <- lapply(outcomes, function(y) {
+  extract_fixest_result(models_list[[y]], outcome = y, term = "D")
+}) %>%
+  bind_rows() %>%
+  mutate(
+    truth = ifelse(outcome %in% paste0("Y", 1:4), "true null", "non-null")
+  )
+
+res_unadjusted %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  kable(caption = "Unadjusted treatment-effect estimates from ten fixest models")
+```
+### Apply p-value adjustments
+```{r}
+# wildrwolf
+# Romano-Wolf adjusted p-values
+# pass the list of hypotheses/models,
+rw <- rwolf(
+  models = models,
+  param = "D",
+  B = 999
+)
+rw
+
+rw_df <- as.data.frame(rw)
+
+# other adjustment methods
+res_adjusted <- res_unadjusted %>%
+  mutate(
+    p_bonferroni = p.adjust(p_raw, method = "bonferroni"),
+    p_holm = p.adjust(p_raw, method = "holm"),
+    p_bh = p.adjust(p_raw, method = "BH"),
+    p_by = p.adjust(p_raw, method = "BY"),
+    p_romano_wolf = rw_df[["RW Pr(>|t|)"]]
+  )
+
+res_adjusted %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  kable(caption = "Raw and adjusted p-values")
+```
+
+### Power
+```{r}
+#| echo: false
+#| results: hide
+## Power tradeoffs across sample size
+outcomes <- paste0("Y", 1:10)
+
+outcome_formula <- as.formula(
+  paste0("c(", paste(outcomes, collapse = ", "), ") ~ D")
+)
+
+fit_10_models <- function(dat) {
+  feols(outcome_formula, data = dat)
+}
+
+adjust_pvalues <- function(models, B_rw = 999) {
+  models_list <- as.list(models)
+  names(models_list) <- outcomes
+
+  raw_res <- lapply(outcomes, function(y) {
+    ct <- coeftable(models_list[[y]])
+
+    data.frame(
+      outcome = y,
+      truth = ifelse(y %in% paste0("Y", 1:4), "true null", "non-null"),
+      estimate = ct["D", "Estimate"],
+      se = ct["D", "Std. Error"],
+      t_stat = ct["D", "t value"],
+      p_raw = ct["D", "Pr(>|t|)"]
+    )
+  }) %>%
+    bind_rows()
+  
+  capture.output({
+    rw_df <- rwolf(
+      models = models,
+      param = "D",
+      B = B_rw
+    ) %>%
+      as.data.frame()
+  })
+
+  rw_p_col <- grep("^RW", names(rw_df), value = TRUE)
+
+  if (length(rw_p_col) != 1) {
+    stop(
+      "Could not uniquely identify the Romano-Wolf p-value column. Columns are: ",
+      paste(names(rw_df), collapse = ", ")
+    )
+  }
+
+  raw_res %>%
+    mutate(
+      p_bonferroni = p.adjust(p_raw, method = "bonferroni"),
+      p_holm = p.adjust(p_raw, method = "holm"),
+      p_bh = p.adjust(p_raw, method = "BH"),
+      p_by = p.adjust(p_raw, method = "BY"),
+      p_romano_wolf = rw_df[[rw_p_col]]
+    )
+}
+summarize_rejections <- function(res, N, sim_id, alpha = 0.05) {
+  res %>%
+    select(
+      outcome,
+      truth,
+      p_raw,
+      p_bonferroni,
+      p_holm,
+      p_romano_wolf,
+      p_bh,
+      p_by
+    ) %>%
+    pivot_longer(
+      cols = starts_with("p_"),
+      names_to = "method",
+      values_to = "p_value"
+    ) %>%
+    mutate(
+      method = recode(
+        method,
+        p_raw = "Unadjusted",
+        p_bonferroni = "Bonferroni",
+        p_holm = "Holm",
+        p_romano_wolf = "Romano-Wolf",
+        p_bh = "BH/FDR",
+        p_by = "BY/FDR"
+      ),
+      rejected = p_value <= alpha,
+      is_null = truth == "true null",
+      is_nonnull = truth == "non-null"
+    ) %>%
+    group_by(method) %>%
+    summarize(
+      N = N,
+      sim_id = sim_id,
+      any_false_rejection = any(rejected & is_null),
+      false_discovery_count = sum(rejected & is_null),
+      any_true_rejection = any(rejected & is_nonnull),
+      true_rejection_count = sum(rejected & is_nonnull),
+      nonnull_count = sum(is_nonnull),
+      average_true_positive_rate = true_rejection_count / nonnull_count,
+      .groups = "drop"
+    )
+}
+run_one_power_sim <- function(N, sim_id, B_rw = 199, alpha = 0.05) {
+  dat <- simulate_10_outcomes(
+    N = N,
+    seed = 100000 + 1000 * N + sim_id
+  )
+
+  models <- fit_10_models(dat)
+
+  adjust_pvalues(models, B_rw = B_rw) %>%
+    summarize_rejections(
+      N = N,
+      sim_id = sim_id,
+      alpha = alpha
+    )
+}
+```
+
+```{r}
+N_grid <- seq(100,500,100)
+
+S <- 100
+B_rw <- 199
+
+power_sim <- lapply(N_grid, function(N_now) {
+  lapply(seq_len(S), function(s) {
+    run_one_power_sim(
+      N = N_now,
+      sim_id = s,
+      B_rw = B_rw,
+      alpha = 0.05
+    )
+  }) %>%
+    bind_rows()
+}) %>%
+  bind_rows()
+```
+
+```{r}
+#| echo: false
+power_summary <- power_sim %>%
+  group_by(N, method) %>%
+  summarize(
+    familywise_error_rate = mean(any_false_rejection),
+    any_discovery_power = mean(any_true_rejection),
+    average_power = mean(average_true_positive_rate),
+    mean_false_discoveries = mean(false_discovery_count),
+    mean_true_discoveries = mean(true_rejection_count),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    method = factor(
+      method,
+      levels = c(
+        "Unadjusted",
+        "Bonferroni",
+        "Holm",
+        "Romano-Wolf",
+        "BH/FDR",
+        "BY/FDR"
+      )
+    )
+  )
+```
+
+```{r}
+#| echo: false
+power_summary %>%
+  select(N, method, any_discovery_power, average_power) %>%
+  pivot_longer(
+    cols = c(any_discovery_power, average_power),
+    names_to = "power_type",
+    values_to = "power"
+  ) %>%
+  mutate(
+    power_type = recode(
+      power_type,
+      any_discovery_power = "At least one real effect rejected",
+      average_power = "Share of real effects rejected"
+    )
+  ) %>%
+  ggplot(aes(x = N, y = power, color = method, shape = method)) +
+  geom_line() +
+  geom_point(size = 2) +
+  facet_wrap(~ power_type) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    x = "Sample size",
+    shape = "Method",
+    color = "Method"
+  ) + theme_bw()
+```
+
+
+
+```{r}
+#| echo: false
+power_summary %>%
+  ggplot(aes(x = N, y = familywise_error_rate, color = method, shape = method)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(limits = c(0, 0.3)) +
+  labs(
+    title = "False Positive Rate. Dashed line is 0.05.",
+    x = "Sample size",
+    color = "Method",
+    shape = "Method"
+  ) + theme_bw()
+```
+
+
+## Missing Data
+
+- **MCAR**: in expectation the estimates are unbiased 
+- **MAR**: can use covariates that determine missingness to impute the missing values of the outcome
+
+### Missing outcome data in RCT
+
+- Treatment is randomized
+- Some people didn't respond
+- Complete-case analysis estimates the effect among respondents 
+  - not necessarily the full sample
+
+### Complete-case estimates and Manski bounds
+
+- Manski bounds use only bounded outcomes
+- Here outcomes are in `[0, 1]`
+- Missing treated outcomes are set to either 0 or 1
+- Missing control outcomes are set to the opposite extreme
+
+```{r}
+#| echo: true
+inv_logit <- function(x) 1 / (1 + exp(-x))
+clip01 <- function(x) pmin(pmax(x, 0), 1)
+
+simulate_missing_outcomes <- function(N = 5000, mechanism = "none", seed = 123) {
+  set.seed(seed)
+
+  X <- rnorm(N)
+  D <- rbinom(N, 1, 0.5)
+
+  Y0 <- clip01(0.35 + 0.18 * X + rnorm(N, 0, 0.1))
+  Y1 <- clip01(Y0 + 0.12 + 0.05 * X + rnorm(N, 0, 0.06))
+  Y <- ifelse(D == 1, Y1, Y0)
+
+  p_R <- switch(
+    mechanism,
+    none = rep(1, N),
+    mcar = rep(0.75, N),
+    covariate = inv_logit(0.5 - 0.8 * abs(X)),
+    outcome = inv_logit(0.5 - 3 * (Y - mean(Y))),
+    treatment_outcome = inv_logit(0.5 + 3 * D - 3 * (Y - mean(Y))),
+    stop("Unknown mechanism")
+  )
+
+  if (mechanism == "none") {
+    R <- rep(1, N)
+  } else {
+    R <- rbinom(N, 1, p_R)
+  }
+
+  Y_obs <- Y
+  Y_obs[R == 0] <- NA
+
+  data.frame(
+    id = 1:N,
+    mechanism = mechanism,
+    X = X,
+    D = D,
+    Y0 = Y0,
+    Y1 = Y1,
+    Y = Y,
+    R = R,
+    Y_obs = Y_obs
+  )
+}
+
+estimate_missing_outcomes <- function(dat) {
+  p1 <- mean(dat$R[dat$D == 1])
+  p0 <- mean(dat$R[dat$D == 0])
+
+  mu1 <- mean(dat$Y_obs[dat$D == 1], na.rm = TRUE)
+  mu0 <- mean(dat$Y_obs[dat$D == 0], na.rm = TRUE)
+
+  data.frame(
+    mechanism = unique(dat$mechanism),
+    true_ate = mean(dat$Y1 - dat$Y0),
+    complete_case = mu1 - mu0,
+    response_treated = p1,
+    response_control = p0,
+    manski_lower = mu1 * p1 - mu0 * p0 - (1 - p0),
+    manski_upper = mu1 * p1 + (1 - p1) - mu0 * p0
+  )
+}
+
+mechanisms <- c("none", "mcar", "covariate", "outcome", "treatment_outcome")
+
+res_missing <- lapply(mechanisms, function(m) {
+  simulate_missing_outcomes(mechanism = m, seed = 1234) %>%
+    estimate_missing_outcomes()
+}) %>%
+  bind_rows() %>%
+  mutate(
+    bias = complete_case - true_ate
+  )
+
+res_missing %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  kable(caption = "Missing outcomes - same experiment, different response mechanisms")
+```
+
+### Lee Bounds
+
+- Provide bounds on the causal effect even with unbounded outcome
+- Relies on monotonicity assumption similar to that used for LATE identification
+- But in this case it serves to solve sample selection
+
+- Treated respondent group contains
+  - Always responders
+  - Treatment-induced responders
+- Control respondent group contains
+  - Always responders
+- Bound for the ATE for the always responder sub-population
+
+```{r}
+# devtools::install_github("vsemenova/leebounds") 
+# try devtools::install_github("haluong89-bcn/leebounds") if the vsemenova/leebounds doesn't work
+library(leebounds)
+
+dat_lee <- simulate_missing_outcomes(
+  N = 5000,
+  mechanism = "treatment_outcome",
+  seed = 1234
+)
+
+lee_input <- dat_lee %>%
+  transmute(
+    treat = D,
+    outcome = Y_obs,
+    selection = R
+  )
+
+lee_raw <- leebounds(lee_input)
+
+do.call("rbind", lee_raw)
+```
+
+### Distribution of complete-case estimates with different missing mechanism
+
+```{r}
+#| echo: false
+mechanisms <- c("mcar", "covariate", "outcome", "treatment_outcome")
+one_missing_sim <- function(mechanism, sim_id, N) {
+  simulate_missing_outcomes(
+    N = N,
+    mechanism = mechanism,
+    seed = 1000 + sim_id
+  ) %>%
+    estimate_missing_outcomes() %>%
+    mutate(
+      sim_id = sim_id,
+      bias = complete_case - true_ate
+    )
+}
+missing_mc <- lapply(mechanisms, function(m) {
+  lapply(1:500, function(s) {
+    one_missing_sim(mechanism = m, sim_id = s, N = 500)
+  }) %>%
+    bind_rows()
+}) %>%
+  bind_rows()
+missing_mc %>%
+  mutate(
+    mechanism = factor(
+      mechanism,
+      levels = mechanisms,
+      labels = c(
+        "MCAR",
+        "Covariate",
+        "Outcome",
+        "Treatment_Outcome"
+      )
+    )
+  ) %>%
+  ggplot(aes(x = complete_case)) +
+  geom_density() +
+  geom_vline(
+    data = missing_mc %>%
+      group_by(mechanism) %>%
+      summarize(mean_true_ate = mean(true_ate), .groups = "drop") %>%
+      mutate(
+        mechanism = factor(
+          mechanism,
+          levels = mechanisms,
+          labels = c(
+            "MCAR",
+            "Covariate",
+            "Outcome",
+            "Treatment_Outcome"
+          )
+        )
+      ),
+    aes(xintercept = mean_true_ate),
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ mechanism, ncol = 2) +
+  labs(
+    title = "Distribution of complete-case estimates. Dashed line is the average true ATE.") +
+  theme_bw()
+```
+
+
+### Missing data in confounders in observational studies
+```{r}
+set.seed(1234)
+
+sim_once <- function(n = 3000, tau = 1, missing = c("MAR", "MNAR")) {
+  missing <- match.arg(missing)
+  
+  # two pre-treatment confounders
+  X1 <- rnorm(n)
+  X2 <- 0.6 * X1 + sqrt(1 - 0.6^2) * rnorm(n)
+  
+  p_D <- plogis(-0.2 + X1 + X2)
+  D <- rbinom(n, 1, p_D)
+  
+  Y <- tau * D + 1 * X1 + 1.5 * X2 + rnorm(n)
+  
+  # Missingness in X2
+  # MAR: missingness depends only on observed X1.
+  # MNAR: missingness depends on X2 itself.
+  if (missing == "MAR") {
+    p_obs <- plogis(1 - 2 * X1)
+  } else {
+    p_obs <- plogis(1 - 2 * X2)
+  }
+  
+  # R = 1 means X2 observed
+  R <- rbinom(n, 1, p_obs)
+  X2_obs <- ifelse(R == 1, X2, NA)
+  
+  dat <- data.frame(Y, D, X1, X2, X2_obs, R)
+  
+  # Estimators
+  # Oracle: what we would estimate if X2 were fully observed.
+  oracle <- coef(lm(Y ~ D + X1 + X2, data = dat))["D"]
+  
+  # Naive: omit the missing confounder entirely.
+  omit_x2 <- coef(lm(Y ~ D + X1, data = dat))["D"]
+  
+  # Complete case: use only units where X2 is observed.
+  complete_case <- coef(
+    lm(Y ~ D + X1 + X2_obs, data = dat, subset = R == 1)
+  )["D"]
+  
+  # Mean imputation 
+  dat$X2_mean_imp <- ifelse(is.na(X2_obs), mean(X2_obs, na.rm = TRUE), X2_obs)
+  mean_imp <- coef(
+    lm(Y ~ D + X1 + X2_mean_imp, data = dat)
+  )["D"]
+  
+  # Missingness-indicator method with Lin (2013) fully interacted
+  dat$X1_c <- dat$X1 - mean(dat$X1)
+  dat$X2_c <- dat$X2 - mean(dat$X2)
+  dat$M2 <- as.integer(is.na(dat$X2_obs))
+  dat$X2_c[dat$M2 == 1] <- 0
+  mim_lin <- coef(
+    lm(Y ~ D * (X1_c + X2_c + M2), data = dat)
+  )["D"]
+  
+  data.frame(
+    missing = missing,
+    estimator = c(
+      "Oracle, X2 fully observed",
+      "Omit X2",
+      "Complete case",
+      "Mean imputation",
+      "Impute 0 + missingness indicator"
+    ),
+    estimate = c(
+      oracle,
+      omit_x2,
+      complete_case,
+      mean_imp,
+      mim_lin
+    ),
+    true_effect = tau
+  )
+}
+
+# One draw
+rbind(
+  sim_once(missing = "MAR"),
+  sim_once(missing = "MNAR")
+)
+```
+
+```{r}
+run_mc <- function(B = 200, missing = c("MAR", "MNAR")) {
+  missing <- match.arg(missing)
+  
+  out <- do.call(
+    rbind,
+    lapply(seq_len(B), function(b) {
+      res <- sim_once(missing = missing)
+      res$sim <- b
+      res
+    })
+  )
+  
+  aggregate(
+    estimate ~ missing + estimator,
+    data = out,
+    FUN = function(x) c(mean = mean(x), sd = sd(x))
+  )
+}
+
+mc_mar <- run_mc(B = 200, missing = "MAR")
+mc_mnar <- run_mc(B = 200, missing = "MNAR")
+
+mc <- rbind(mc_mar, mc_mnar)
+mc <- do.call(data.frame, mc)
+names(mc) <- c("missing", "estimator", "mean_estimate", "sd_estimate")
+mc$bias <- mc$mean_estimate - 1
+
+mc
+```
+
+```{r}
+ggplot(mc, aes(x = estimator, y = mean_estimate)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_point(size = 2) +
+  geom_errorbar(
+    aes(
+      ymin = mean_estimate - 1.96 * sd_estimate,
+      ymax = mean_estimate + 1.96 * sd_estimate
+    ),
+    width = 0.15
+  ) +
+  facet_wrap(~ missing) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    subtitle = "Dashed line is the true treatment effect"
+  ) +
+  theme_bw()
+```
+
+####  Some recent/current work on missing data 
+<https://naijialiu.github.io>
+
+## Differential Measurment Errors
+
+<https://imai.fas.harvard.edu/research/files/merror.pdf>
+
+```{r}
+set.seed(1234)
+
+sim_merror_once <- function(
+  n = 5000,
+  tau = 0.5,
+  gamma = 0
+) {
+  
+  Z_star <- rbinom(n, 1, 0.5)
+  
+  Y <- tau * Z_star + rnorm(n)
+  
+  # gamma = 0:
+  #   reporting depends only on true treatment.
+  #   This is nondifferential measurement error.
+  # gamma > 0: Differential measurement error.
+  #   high-Y units are more likely to be reported as treated.
+  #   low-Y units are more likely to be reported as control.
+  p_report_treated <- plogis(-2 + 4 * Z_star + gamma * Y)
+  Z_obs <- rbinom(n, 1, p_report_treated)
+  
+  oracle <- coef(lm(Y ~ Z_star))["Z_star"]
+  naive  <- coef(lm(Y ~ Z_obs))["Z_obs"]
+  
+  data.frame(
+    gamma = gamma,
+    oracle = oracle,
+    naive = naive,
+    true_effect = tau,
+    bias_naive = naive - tau)
+}
+
+rbind(
+  sim_merror_once(gamma = 0),
+  sim_merror_once(gamma = 0.5),
+  sim_merror_once(gamma = 1.0),
+  sim_merror_once(gamma = 1.5),
+  sim_merror_once(gamma = 2.0)
+)
+```
+
+```{r}
+sim_merror_once <- function(n = 500, tau = 0.5, gamma = 0) {
+  Z_star <- rbinom(n, 1, 0.5)
+  Y <- tau * Z_star + rnorm(n)
+  
+  p_report_treated <- plogis(-2 + 4 * Z_star + gamma * Y)
+  Z_obs <- rbinom(n, 1, p_report_treated)
+  
+  data.frame(
+    oracle = coef(lm(Y ~ Z_star))["Z_star"],
+    naive  = coef(lm(Y ~ Z_obs))["Z_obs"]
+  )
+}
+
+mc_merror <- expand.grid(
+  gamma = seq(0, 2, by = 0.25),
+  sim = 1:200
+) %>%
+  pmap_dfr(function(gamma, sim) {
+    sim_merror_once(gamma = gamma) %>%
+      mutate(gamma = gamma, sim = sim)
+  }) %>%
+  pivot_longer(
+    cols = c(oracle, naive),
+    names_to = "estimator",
+    values_to = "estimate"
+  ) %>%
+  group_by(gamma, estimator) %>%
+  summarise(
+    mean = mean(estimate),
+    se = sd(estimate) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(mc_merror, aes(x = gamma, y = mean, linetype = estimator)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_ribbon(
+    aes(ymin = mean - 1.96 * se, ymax = mean + 1.96 * se, group = estimator),
+    alpha = 0.15,
+    linetype = 0
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = "Strength of outcome-dependent reporting error",
+    y = "Estimated treatment effect",
+    subtitle = "Dashed line is the true effect; bands are 95% Monte Carlo SE intervals",
+    linetype = NULL
+  ) +
+  theme_bw()
+```
+
+## Some recent/current work Partial Identification
+
+[Autobounds](https://jmummolo.scholar.princeton.edu/sites/g/files/toruqf3341/files/documents/autobounds_general_draft_0.pdf)
+
+The computational idea behind AutoBounds:
+
+1. Define the causal estimand.
+2. Specify the latent causal/data-generating process.
+3. Specify which variables or margins are observed in the discrete data.
+4. Translate probability axioms, observed-data restrictions, and assumptions into equality or inequality constraints.
+5. Search over all latent distributions or DGPs consistent with those constraints.
+6. Minimize and maximize the estimand over that feasible set.
+
+Minimum $=$ maximum, the estimand is point identified.
+
+Minimum $\neq$ maximum, sharp bounds.
+
+### selection into administrative data example
+
+Racial bias in police use of force using police records
+
+- Treatment $D_i$: civilian race
+- Mediator $M_i$: whether the police stop the civilian
+- Outcome $Y_i$: force used (zero if no stop)
+- Unobserved $U_i$: e.g., officer suspicion / sense of threat
+
+[Autobounds demo by Cooper Duarte and Knox 2023](https://github.com/duarteguilherme/autobounds/blob/main/autobounds_demo/apsa2023/klm_demo.ipynb)
