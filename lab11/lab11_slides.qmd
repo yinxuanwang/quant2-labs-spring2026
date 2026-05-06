@@ -640,7 +640,7 @@ sim_once <- function(n = 3000, tau = 1, missing = c("MAR", "MNAR")) {
   
   # Missingness-indicator method with Lin (2013) fully interacted
   dat$X1_c <- dat$X1 - mean(dat$X1)
-  dat$X2_c <- dat$X2 - mean(dat$X2)
+  dat$X2_c <- dat$X2_obs - mean(dat$X2_obs, na.rm = TRUE)
   dat$M2 <- as.integer(is.na(dat$X2_obs))
   dat$X2_c[dat$M2 == 1] <- 0
   mim_lin <- coef(
